@@ -41,40 +41,35 @@
   <div id="status"></div>
 
 <script>
-  // CHANGE THIS to something unique to you, so your counter doesn't mix with anyone else's.
-  var NAMESPACE = "thisstupidtestsite-demo-8431";
-  var NAME = "clicks";
-  var BASE = "https://api.counterapi.dev/v1/" + NAMESPACE + "/" + NAME;
+  // CHANGE THIS to something long and unique to you, so your counter doesn't mix with anyone else's.
+  var KEY = "thisstupidtestsite_clicks_8431";
+  var BASE = "https://countapi.mileshilliard.com/api/v1/";
 
   var countEl = document.getElementById("count");
   var statusEl = document.getElementById("status");
   var btn = document.getElementById("btn");
 
-  function readCount(data) {
-    var v = data.count !== undefined ? data.count : data.Count;
-    return (v === undefined || v === null) ? "?" : Number(v).toLocaleString();
+  function show(data) {
+    var n = Number(data.value);
+    countEl.textContent = isNaN(n) ? "?" : n.toLocaleString();
   }
 
-  function call(path) {
-    return fetch(BASE + path).then(function (r) {
+  function call(action) {
+    return fetch(BASE + action + "/" + KEY).then(function (r) {
       if (!r.ok) throw new Error("HTTP " + r.status);
       return r.json();
     });
   }
 
-  // Show the current total on load. A brand-new counter returns an error until first click.
-  call("").then(function (d) {
-    countEl.textContent = readCount(d);
-  }).catch(function () {
+  // Show the current total on load. A brand-new key returns 404 until the first click.
+  call("get").then(show).catch(function () {
     countEl.textContent = "0";
   });
 
   btn.addEventListener("click", function () {
     btn.disabled = true;
     statusEl.textContent = "";
-    call("/up").then(function (d) {
-      countEl.textContent = readCount(d);
-    }).catch(function () {
+    call("hit").then(show).catch(function () {
       statusEl.textContent = "Couldn't reach the counter service. Try again.";
     }).then(function () {
       btn.disabled = false;
