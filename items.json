@@ -1,0 +1,10 @@
+{
+  "items": [
+    { "id": "knife", "name": "Knife", "key": "1", "type": "melee", "color": "#dddddd",
+      "damage": 16, "variance": 0.1, "cooldown": 0.45, "range": 48, "arc": 1.4 },
+    { "id": "gun", "name": "Gun", "key": "2", "type": "projectile", "color": "#ffdd44",
+      "damage": 8, "variance": 0.1, "cooldown": 0.22, "speed": 700, "life": 0.9, "radius": 4 },
+    { "id": "bomb", "name": "Bomb", "key": "3", "type": "thrown", "color": "#ff5555",
+      "damage": 35, "variance": 0.1, "cooldown": 6, "speed": 600, "drag": 3, "fuse": 1.5, "radius": 110 }
+  ]
+}
