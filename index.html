@@ -3,78 +3,230 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Global Counter</title>
+<title>Simple Shooter</title>
 <style>
-  :root {
-    --bg: #ffffff;
-    --fg: #222222;
-    box-sizing: border-box;
-    padding-top: env(safe-area-inset-top, 0px);
-    padding-bottom: env(safe-area-inset-bottom, 0px);
-  }
-  @media (prefers-color-scheme: dark) {
-    :root:not([data-theme="light"]) { --bg: #1c1c1c; --fg: #eeeeee; }
-  }
-  :root[data-theme="dark"] { --bg: #1c1c1c; --fg: #eeeeee; }
-  html, body { height: 100%; margin: 0; }
-  body {
-    background: var(--bg);
-    color: var(--fg);
-    font-family: system-ui, -apple-system, "Segoe UI", Arial, sans-serif;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    gap: 1rem;
-  }
-  h1 { font-size: 2rem; font-weight: 400; margin: 0; }
-  #count { font-size: 3rem; margin: 0; }
-  button { font-size: 1.1rem; padding: 0.6rem 1.4rem; cursor: pointer; }
-  #status { font-size: 0.85rem; opacity: 0.6; min-height: 1em; }
+  html,body{margin:0;height:100%;background:#151515;color:#eee;font-family:system-ui,Arial,sans-serif;overflow:hidden}
+  canvas{display:block;width:100%;height:100%}
+  #menu{position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;background:#151515}
+  #menu input,#menu button{font-size:1rem;padding:.5rem .8rem}
+  #msg{opacity:.7;min-height:1.2em}
 </style>
 </head>
 <body>
-  <h1>Hello, World</h1>
-  <p>Total clicks from everyone:</p>
-  <p id="count">...</p>
-  <button id="btn">Click me</button>
-  <div id="status"></div>
-
+<canvas id="cv"></canvas>
+<div id="menu">
+  <h1 style="font-weight:400;margin:0">Simple Shooter</h1>
+  <input id="name" placeholder="Your name" maxlength="12">
+  <button id="hostBtn">Host a game</button>
+  <div>or</div>
+  <input id="code" placeholder="Room code" maxlength="4" style="text-transform:uppercase">
+  <button id="joinBtn">Join</button>
+  <div id="msg"></div>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js"></script>
 <script>
-  // CHANGE THIS to something long and unique to you, so your counter doesn't mix with anyone else's.
-  var KEY = "thisstupidtestsite_clicks_8431";
-  var BASE = "https://countapi.mileshilliard.com/api/v1/";
+const W=1000,H=700,R=16,SPEED=220,MAXHP=100,RESPAWN=3,PREFIX="tstshooter-";
+let ITEMS=[],players={},projs=[],bombs=[],fx=[],pendingFx=[];
+let isHost=false,started=false,peer,conns=[],hostConn=null,myId="host",roomMsg="",slot=0;
+let sc=1,ox=0,oy=0;
+const keys={},mouse={x:0,y:0,down:false};
+const $=id=>document.getElementById(id), cv=$("cv"), ctx=cv.getContext("2d");
+const msg=t=>$("msg").textContent=t;
+const nm=()=>$("name").value.trim()||"Player"+Math.floor(Math.random()*90+10);
+const byId=id=>ITEMS.find(i=>i.id===id)||{};
 
-  var countEl = document.getElementById("count");
-  var statusEl = document.getElementById("status");
-  var btn = document.getElementById("btn");
+// Items come from items.json (host loads it and sends it to joiners).
+const ready=fetch("items.json").then(r=>r.json()).then(j=>{ITEMS=j.items});
 
-  function show(data) {
-    var n = Number(data.value);
-    countEl.textContent = isNaN(n) ? "?" : n.toLocaleString();
+// ---- behaviors: items pick one by "type"; add new items in the JSON without touching this ----
+const BEHAVIORS={
+  melee(p,it){
+    addFx({k:"swing",x:p.x,y:p.y,a:p.a,r:it.range,arc:it.arc});
+    for(const q of Object.values(players)){
+      if(q===p||q.dead)continue;
+      const dx=q.x-p.x,dy=q.y-p.y;
+      const d=Math.abs(((Math.atan2(dy,dx)-p.a+Math.PI*3)%(Math.PI*2))-Math.PI);
+      if(Math.hypot(dx,dy)<=it.range+R&&d<=it.arc/2)hurt(q,it,p);
+    }
+  },
+  projectile(p,it){
+    const c=Math.cos(p.a),s=Math.sin(p.a);
+    projs.push({x:p.x+c*R,y:p.y+s*R,vx:c*it.speed,vy:s*it.speed,life:it.life,owner:p.id,item:it.id});
+  },
+  thrown(p,it){
+    const c=Math.cos(p.a),s=Math.sin(p.a);
+    bombs.push({x:p.x,y:p.y,vx:c*it.speed,vy:s*it.speed,fuse:it.fuse,owner:p.id,item:it.id});
   }
+};
 
-  function call(action) {
-    return fetch(BASE + action + "/" + KEY).then(function (r) {
-      if (!r.ok) throw new Error("HTTP " + r.status);
-      return r.json();
-    });
+// ---- simulation (host only) ----
+function addFx(e){fx.push({...e,age:0});if(isHost)pendingFx.push(e)}
+function spawn(p){p.x=R+Math.random()*(W-2*R);p.y=R+Math.random()*(H-2*R);p.hp=MAXHP;p.dead=false;p.cd={}}
+function addPlayer(id,name){
+  const p={id,name,a:0,slot:0,kills:0,deaths:0,respawn:0,in:{k:[0,0,0,0],a:0,f:false,s:0}};
+  spawn(p);players[id]=p;
+}
+function hurt(q,it,src){
+  q.hp-=Math.round(it.damage*(1+(Math.random()*2-1)*(it.variance||0)));
+  if(q.hp<=0){q.hp=0;q.dead=true;q.respawn=RESPAWN;q.deaths++;if(src&&src!==q)src.kills++}
+}
+function step(dt){
+  for(const p of Object.values(players)){
+    for(const k in p.cd)p.cd[k]=Math.max(0,p.cd[k]-dt);
+    if(p.dead){if((p.respawn-=dt)<=0)spawn(p);continue}
+    const i=p.in;p.a=i.a;p.slot=ITEMS[i.s]?i.s:0;
+    const dx=i.k[3]-i.k[1],dy=i.k[2]-i.k[0],l=Math.hypot(dx,dy)||1;
+    p.x=Math.min(W-R,Math.max(R,p.x+dx/l*SPEED*dt));
+    p.y=Math.min(H-R,Math.max(R,p.y+dy/l*SPEED*dt));
+    const it=ITEMS[p.slot];
+    if(i.f&&it&&!(p.cd[it.id]>0)){p.cd[it.id]=it.cooldown;BEHAVIORS[it.type]&&BEHAVIORS[it.type](p,it)}
   }
-
-  // Show the current total on load. A brand-new key returns 404 until the first click.
-  call("get").then(show).catch(function () {
-    countEl.textContent = "0";
+  projs=projs.filter(o=>{
+    const it=byId(o.item);o.x+=o.vx*dt;o.y+=o.vy*dt;o.life-=dt;
+    if(o.life<=0||o.x<0||o.x>W||o.y<0||o.y>H)return false;
+    for(const q of Object.values(players)){
+      if(q.dead||q.id===o.owner)continue;
+      if(Math.hypot(q.x-o.x,q.y-o.y)<R+(it.radius||4)){hurt(q,it,players[o.owner]);return false}
+    }
+    return true;
   });
+  bombs=bombs.filter(o=>{
+    const it=byId(o.item),f=Math.exp(-(it.drag||3)*dt);
+    o.vx*=f;o.vy*=f;o.x=Math.min(W,Math.max(0,o.x+o.vx*dt));o.y=Math.min(H,Math.max(0,o.y+o.vy*dt));
+    if((o.fuse-=dt)>0)return true;
+    addFx({k:"boom",x:o.x,y:o.y,r:it.radius});
+    for(const q of Object.values(players))if(!q.dead&&Math.hypot(q.x-o.x,q.y-o.y)<=it.radius)hurt(q,it,players[o.owner]);
+    return false;
+  });
+}
 
-  btn.addEventListener("click", function () {
-    btn.disabled = true;
-    statusEl.textContent = "";
-    call("hit").then(show).catch(function () {
-      statusEl.textContent = "Couldn't reach the counter service. Try again.";
-    }).then(function () {
-      btn.disabled = false;
+// ---- networking (PeerJS: one player hosts, others join with the room code) ----
+function startGame(m){started=true;roomMsg=m;$("menu").style.display="none"}
+async function host(){
+  try{await ready}catch(e){return msg("Couldn't load items.json")}
+  const code=Math.random().toString(36).slice(2,6).toUpperCase();
+  peer=new Peer(PREFIX+code);
+  peer.on("open",()=>{isHost=true;myId="host";addPlayer(myId,nm());startGame("Room code: "+code)});
+  peer.on("error",e=>{if(e.type==="unavailable-id"){peer.destroy();host()}else msg("Error: "+e.type)});
+  peer.on("connection",c=>{
+    c.on("open",()=>{conns.push(c);c.send({t:"init",id:c.peer,items:ITEMS})});
+    c.on("data",d=>{
+      if(d.t==="hi")addPlayer(c.peer,String(d.name).slice(0,12));
+      else if(d.t==="in"&&players[c.peer])players[c.peer].in={k:d.k,a:d.a,f:d.f,s:d.s};
     });
+    c.on("close",()=>{conns=conns.filter(x=>x!==c);delete players[c.peer]});
   });
+}
+function join(){
+  const code=$("code").value.trim().toUpperCase();
+  if(code.length<4)return msg("Enter the 4-letter room code");
+  peer=new Peer();
+  peer.on("error",e=>msg(e.type==="peer-unavailable"?"Room not found":"Error: "+e.type));
+  peer.on("open",()=>{
+    hostConn=peer.connect(PREFIX+code);
+    hostConn.on("open",()=>hostConn.send({t:"hi",name:nm()}));
+    hostConn.on("data",d=>{
+      if(d.t==="init"){myId=d.id;ITEMS=d.items;startGame("Room code: "+code)}
+      else if(d.t==="s")applySnap(d);
+    });
+    hostConn.on("close",()=>{started=false;$("menu").style.display="flex";msg("Host left the game")});
+  });
+}
+function broadcast(){
+  const s={t:"s",
+    p:Object.values(players).map(p=>[p.id,p.name,p.x,p.y,p.a,p.hp,p.slot,p.kills,p.deaths,p.dead?1:0,ITEMS.map(i=>+(p.cd[i.id]||0).toFixed(2))]),
+    pr:projs.map(o=>[o.x|0,o.y|0,o.item]),bm:bombs.map(o=>[o.x|0,o.y|0,o.item]),fx:pendingFx};
+  pendingFx=[];conns.forEach(c=>c.open&&c.send(s));
+}
+function applySnap(d){
+  const seen={};
+  for(const [id,name,x,y,a,hp,sl,k,de,dead,cd] of d.p){
+    seen[id]=1;const p=players[id]||(players[id]={rx:x,ry:y});
+    Object.assign(p,{id,name,x,y,a,hp,slot:sl,kills:k,deaths:de,dead:!!dead,cdArr:cd});
+  }
+  for(const id in players)if(!seen[id])delete players[id];
+  projs=d.pr.map(a=>({x:a[0],y:a[1],item:a[2]}));
+  bombs=d.bm.map(a=>({x:a[0],y:a[1],item:a[2]}));
+  d.fx.forEach(e=>fx.push({...e,age:0}));
+}
+
+// ---- input ----
+addEventListener("keydown",e=>{
+  if(!started)return;const k=e.key.toLowerCase();
+  if("wasd".includes(k)&&k.length===1)keys[k]=1;
+  const i=ITEMS.findIndex(it=>it.key===e.key);if(i>=0)slot=i;
+});
+addEventListener("keyup",e=>{keys[e.key.toLowerCase()]=0});
+addEventListener("blur",()=>{for(const k in keys)keys[k]=0;mouse.down=false});
+addEventListener("mousemove",e=>{mouse.x=(e.clientX-ox)/sc;mouse.y=(e.clientY-oy)/sc});
+cv.addEventListener("mousedown",e=>{if(e.button===0)mouse.down=true});
+addEventListener("mouseup",()=>{mouse.down=false});
+$("hostBtn").onclick=host;$("joinBtn").onclick=join;
+
+// ---- drawing ----
+const col=id=>{let h=0;for(const c of id)h=(h*31+c.charCodeAt(0))%360;return`hsl(${h},70%,55%)`};
+function draw(){
+  const w=innerWidth,h=innerHeight,dpr=devicePixelRatio||1;
+  if(cv.width!==Math.round(w*dpr)||cv.height!==Math.round(h*dpr)){cv.width=Math.round(w*dpr);cv.height=Math.round(h*dpr)}
+  sc=Math.min(w/W,h/H);ox=(w-W*sc)/2;oy=(h-H*sc)/2;
+  ctx.setTransform(1,0,0,1,0,0);ctx.fillStyle="#0b0b0b";ctx.fillRect(0,0,cv.width,cv.height);
+  ctx.setTransform(dpr*sc,0,0,dpr*sc,dpr*ox,dpr*oy);
+  ctx.fillStyle="#222";ctx.fillRect(0,0,W,H);
+  ctx.strokeStyle="#2c2c2c";ctx.lineWidth=1;ctx.beginPath();
+  for(let x=0;x<=W;x+=50){ctx.moveTo(x,0);ctx.lineTo(x,H)}
+  for(let y=0;y<=H;y+=50){ctx.moveTo(0,y);ctx.lineTo(W,y)}
+  ctx.stroke();
+  for(const o of bombs){const it=byId(o.item);
+    ctx.strokeStyle="rgba(255,80,80,.2)";ctx.beginPath();ctx.arc(o.x,o.y,it.radius||0,0,7);ctx.stroke();
+    ctx.fillStyle=it.color;ctx.beginPath();ctx.arc(o.x,o.y,7,0,7);ctx.fill()}
+  for(const o of projs){ctx.fillStyle=byId(o.item).color;ctx.beginPath();ctx.arc(o.x,o.y,4,0,7);ctx.fill()}
+  const me=players[myId];
+  for(const p of Object.values(players)){
+    if(p.dead)continue;const x=p.rx??p.x,y=p.ry??p.y,c=Math.cos(p.a),s=Math.sin(p.a);
+    ctx.fillStyle=col(p.id);ctx.beginPath();ctx.arc(x,y,R,0,7);ctx.fill();
+    ctx.strokeStyle="#fff";ctx.lineWidth=3;ctx.beginPath();ctx.moveTo(x,y);ctx.lineTo(x+c*(R+8),y+s*(R+8));ctx.stroke();
+    ctx.fillStyle=(ITEMS[p===me?slot:p.slot]||{}).color||"#fff";ctx.beginPath();ctx.arc(x+c*(R+8),y+s*(R+8),5,0,7);ctx.fill();
+    ctx.fillStyle="#eee";ctx.font="12px system-ui";ctx.textAlign="center";ctx.fillText(p.name,x,y-R-14);
+    ctx.fillStyle="#400";ctx.fillRect(x-20,y-R-10,40,5);ctx.fillStyle="#4c4";ctx.fillRect(x-20,y-R-10,40*p.hp/MAXHP,5);
+  }
+  for(const e of fx){
+    if(e.k==="swing"){ctx.fillStyle=`rgba(255,255,255,${Math.max(0,.5-e.age*3)})`;ctx.beginPath();ctx.moveTo(e.x,e.y);ctx.arc(e.x,e.y,e.r+R,e.a-e.arc/2,e.a+e.arc/2);ctx.fill()}
+    else{ctx.fillStyle=`rgba(255,140,40,${Math.max(0,.6-e.age*1.7)})`;ctx.beginPath();ctx.arc(e.x,e.y,e.r*Math.min(1,e.age*5),0,7);ctx.fill()}
+  }
+  // HUD
+  ctx.textAlign="left";ctx.fillStyle="#aaa";ctx.font="14px system-ui";ctx.fillText(roomMsg+"   (WASD move, mouse aim/click, 1-"+ITEMS.length+" items)",10,20);
+  if(me){ctx.fillStyle="#eee";ctx.font="bold 16px system-ui";ctx.fillText("HP "+me.hp+"  K "+me.kills+"  D "+me.deaths,10,42)}
+  ctx.textAlign="right";ctx.font="14px system-ui";
+  Object.values(players).sort((a,b)=>b.kills-a.kills).slice(0,8).forEach((p,i)=>{ctx.fillStyle=col(p.id);ctx.fillText(p.name+"  "+p.kills,W-10,20+i*18)});
+  ITEMS.forEach((it,i)=>{
+    const x=W/2-ITEMS.length*50+i*100+4,y=H-56,cd=me?(me.cdArr?me.cdArr[i]:(me.cd[it.id]||0)):0;
+    ctx.fillStyle=i===slot?"#555":"#333";ctx.fillRect(x,y,92,44);
+    if(cd>0){ctx.fillStyle="rgba(0,0,0,.6)";ctx.fillRect(x,y,92*Math.min(1,cd/it.cooldown),44)}
+    ctx.strokeStyle=it.color;ctx.lineWidth=i===slot?3:1;ctx.strokeRect(x,y,92,44);
+    ctx.fillStyle="#fff";ctx.textAlign="center";ctx.fillText(it.key+" "+it.name,x+46,y+27);
+  });
+  if(me&&me.dead){ctx.fillStyle="#fff";ctx.font="bold 32px system-ui";ctx.textAlign="center";ctx.fillText("Respawning...",W/2,H/2)}
+}
+
+// ---- main loop ----
+let last=performance.now(),snapT=0,inT=0;
+function loop(t){
+  const dt=Math.min(.05,(t-last)/1000);last=t;
+  if(started){
+    const me=players[myId];
+    if(me){
+      const px=me.rx??me.x,py=me.ry??me.y;
+      const inp={k:[keys.w|0,keys.a|0,keys.s|0,keys.d|0],a:Math.atan2(mouse.y-py,mouse.x-px),f:mouse.down,s:slot};
+      if(isHost)me.in=inp;else if(hostConn&&hostConn.open&&(inT+=dt)>.033){inT=0;hostConn.send({t:"in",...inp})}
+    }
+    if(isHost){step(dt);if((snapT+=dt)>.05){snapT=0;broadcast()}}
+    else for(const p of Object.values(players)){const f=Math.min(1,dt*15);p.rx+=(p.x-p.rx)*f;p.ry+=(p.y-p.ry)*f}
+    fx.forEach(e=>e.age+=dt);fx=fx.filter(e=>e.age<.4);
+    draw();
+  }
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
 </script>
 </body>
 </html>
