@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Global Counter</title>
+<style>
+  :root {
+    --bg: #ffffff;
+    --fg: #222222;
+    box-sizing: border-box;
+    padding-top: env(safe-area-inset-top, 0px);
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) { --bg: #1c1c1c; --fg: #eeeeee; }
+  }
+  :root[data-theme="dark"] { --bg: #1c1c1c; --fg: #eeeeee; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg);
+    color: var(--fg);
+    font-family: system-ui, -apple-system, "Segoe UI", Arial, sans-serif;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 1rem;
+  }
+  h1 { font-size: 2rem; font-weight: 400; margin: 0; }
+  #count { font-size: 3rem; margin: 0; }
+  button { font-size: 1.1rem; padding: 0.6rem 1.4rem; cursor: pointer; }
+  #status { font-size: 0.85rem; opacity: 0.6; min-height: 1em; }
+</style>
+</head>
+<body>
+  <h1>Hello, World</h1>
+  <p>Total clicks from everyone:</p>
+  <p id="count">...</p>
+  <button id="btn">Click me</button>
+  <div id="status"></div>
+
+<script>
+  // CHANGE THIS to something unique to you, so your counter doesn't mix with anyone else's.
+  var NAMESPACE = "thisstupidtestsite-demo-8431";
+  var NAME = "clicks";
+  var BASE = "https://api.counterapi.dev/v1/" + NAMESPACE + "/" + NAME;
+
+  var countEl = document.getElementById("count");
+  var statusEl = document.getElementById("status");
+  var btn = document.getElementById("btn");
+
+  function readCount(data) {
+    var v = data.count !== undefined ? data.count : data.Count;
+    return (v === undefined || v === null) ? "?" : Number(v).toLocaleString();
+  }
+
+  function call(path) {
+    return fetch(BASE + path).then(function (r) {
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      return r.json();
+    });
+  }
+
+  // Show the current total on load. A brand-new counter returns an error until first click.
+  call("").then(function (d) {
+    countEl.textContent = readCount(d);
+  }).catch(function () {
+    countEl.textContent = "0";
+  });
+
+  btn.addEventListener("click", function () {
+    btn.disabled = true;
+    statusEl.textContent = "";
+    call("/up").then(function (d) {
+      countEl.textContent = readCount(d);
+    }).catch(function () {
+      statusEl.textContent = "Couldn't reach the counter service. Try again.";
+    }).then(function () {
+      btn.disabled = false;
+    });
+  });
+</script>
+</body>
+</html>
