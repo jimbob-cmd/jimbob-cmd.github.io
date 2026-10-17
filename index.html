@@ -1,7 +1,8 @@
-<!doctype html>
-<html lang="en">
+
+<!DOCTYPE html>
+<html>
 <head>
-  <meta charset="utf-8">
+  <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>TabStream</title>
 </head>
@@ -9,43 +10,132 @@
   <h1>TabStream</h1>
   <p>Share a browser tab with one other person.</p>
 
-  <h2>Create a stream</h2>
-  <button id="createButton">Create stream</button>
-  <p id="createStatus">No stream created.</p>
-
-  <h2>Join a stream</h2>
-  <label for="roomCode">Stream code:</label>
-  <input id="roomCode" maxlength="6" autocomplete="off" placeholder="ABC123">
-  <button id="joinButton">Join stream</button>
-  <p id="joinStatus">Not connected.</p>
+  <button id="create">Create stream</button>
+  <p id="mycode"></p>
 
   <hr>
-  <section id="roomSection" hidden>
-    <h2>Stream room</h2>
-    <p>Room code: <strong id="roomCodeDisplay"></strong></p>
-    <p id="connectionStatus">Waiting for the other person...</p>
-    <video id="remoteVideo" autoplay playsinline controls style="max-width: 100%;"></video>
-    <p>
-      <button id="stopShareButton" disabled>Stop sharing</button>
-      <button id="leaveButton">Leave room</button>
-    </p>
 
-    <h2>Chat</h2>
-    <div id="chatMessages" aria-live="polite"></div>
-    <form id="chatForm">
-      <label for="chatInput">Message:</label>
-      <input id="chatInput" maxlength="1000" autocomplete="off" required>
-      <button type="submit">Send</button>
-    </form>
-  </section>
+  <input id="code" placeholder="Enter stream code">
+  <button id="join">Join stream</button>
 
-  <p>
-    Note: screen sharing requires a secure context (HTTPS, such as GitHub Pages).
-    Keep your stream code private. This demo uses a public room channel and is not
-    designed for sensitive content.
-  </p>
+  <p id="status">Not connected.</p>
 
-  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-  <script src="app.js"></script>
+  <h2>Stream</h2>
+  <video id="screen" autoplay playsinline controls
+         style="max-width:100%"></video>
+
+  <p><button id="stop">Stop sharing</button></p>
+
+  <h2>Chat</h2>
+  <div id="messages"></div>
+  <input id="message" placeholder="Message">
+  <button id="send">Send</button>
+
+  <script src="https://unpkg.com/peerjs@1.5.5/dist/peerjs.min.js"></script>
+  <script>
+    const $ = id => document.getElementById(id);
+    let peer, connection, stream;
+
+    function status(text) {
+      $("status").textContent = text;
+    }
+
+    function showMessage(who, text) {
+      const p = document.createElement("p");
+      p.textContent = who + ": " + text;
+      $("messages").appendChild(p);
+    }
+
+    function setupConnection(conn) {
+      if (connection) {
+        conn.close();
+        return;
+      }
+
+      connection = conn;
+
+      conn.on("open", () => {
+        status("Connected.");
+        showMessage("System", "Connected to the other person.");
+      });
+
+      conn.on("data", data => {
+        if (data.type === "chat") {
+          showMessage("Other person", data.text);
+        }
+
+        if (data.type === "offer") {
+          answerCall(data.offer);
+        }
+      });
+
+      conn.on("close", () => {
+        connection = null;
+        status("Connection closed.");
+      });
+    }
+
+    function answerCall(offer) {
+      const call = peer.call(offer.peerId, stream || undefined);
+      call.on("stream", remote => {
+        $("screen").srcObject = remote;
+      });
+    }
+
+    $("create").onclick = async () => {
+      peer = new Peer();
+
+      peer.on("open", id => {
+        $("mycode").textContent = "Your stream code: " + id;
+        $("code").value = id;
+        status("Waiting for the other person...");
+      });
+
+      peer.on("connection", setupConnection);
+
+      try {
+        stream = await navigator.mediaDevices.getDisplayMedia({
+          video: true,
+          audio: true
+        });
+        $("screen").srcObject = stream;
+      } catch (e) {
+        status("Screen sharing cancelled or unavailable.");
+      }
+    };
+
+    $("join").onclick = () => {
+      const id = $("code").value.trim();
+      if (!id) return;
+
+      peer = new Peer();
+
+      peer.on("open", () => {
+        const conn = peer.connect(id);
+        setupConnection(conn);
+      });
+
+      peer.on("error", e => status("Connection error: " + e.type));
+    };
+
+    $("send").onclick = () => {
+      const text = $("message").value.trim();
+      if (!text || !connection || !connection.open) return;
+
+      connection.send({ type: "chat", text });
+      showMessage("Me", text);
+      $("message").value = "";
+    };
+
+    $("message").onkeydown = e => {
+      if (e.key === "Enter") $("send").click();
+    };
+
+    $("stop").onclick = () => {
+      if (stream) stream.getTracks().forEach(track => track.stop());
+      stream = null;
+      $("screen").srcObject = null;
+    };
+  </script>
 </body>
 </html>
