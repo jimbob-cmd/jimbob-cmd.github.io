@@ -1,141 +1,243 @@
-
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>TabStream</title>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>Roll Together</title>
+<style>
+  :root { --felt:#1f5a45; --rail:#4a2e1b; --ink:#f4efe3; --panel:rgba(20,16,12,.72); }
+  * { box-sizing: border-box; }
+  html, body { margin:0; height:100%; overflow:hidden; background:var(--rail); touch-action:none; }
+  body { font-family: "Trebuchet MS", "Segoe UI", sans-serif; color:var(--ink); }
+  canvas { display:block; width:100%; height:100%; }
+  #hud { position:fixed; top:12px; left:12px; display:flex; gap:8px; align-items:center; flex-wrap:wrap;
+         background:var(--panel); padding:8px 10px; border-radius:999px; backdrop-filter:blur(6px); max-width:calc(100% - 24px); }
+  #hud input { background:transparent; border:0; border-bottom:2px solid rgba(244,239,227,.4); color:var(--ink);
+               font:inherit; width:110px; padding:2px 4px; }
+  #hud input:focus-visible, #hud button:focus-visible { outline:2px solid #ffd166; outline-offset:2px; }
+  #hud button { background:#ffd166; color:#2a1c10; border:0; border-radius:999px; font:inherit; font-weight:700; padding:5px 12px; cursor:pointer; }
+  #status { font-size:14px; opacity:.9; }
+  #help { position:fixed; bottom:12px; left:50%; transform:translateX(-50%); background:var(--panel); padding:6px 14px;
+          border-radius:999px; font-size:13px; pointer-events:none; white-space:nowrap; }
+</style>
 </head>
 <body>
-  <h1>TabStream</h1>
-  <p>Share a browser tab with one other person.</p>
+<canvas id="c"></canvas>
+<div id="hud">
+  <input id="name" maxlength="12" placeholder="Your name" aria-label="Your name">
+  <span id="status">Connecting…</span>
+  <button id="share">Copy invite link</button>
+</div>
+<div id="help">Move with WASD / arrow keys, or press and hold to roll toward your finger or cursor</div>
 
-  <button id="create">Create stream</button>
-  <p id="mycode"></p>
+<script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<script>
+/* ---------- Setup ---------- */
+const WORLD = { w: 2000, h: 1200 }, R = 22, TICK = 50;
+const COLORS = ["#e63946","#ffb703","#4cc9f0","#b5179e","#f77f00","#90be6a","#f8f9fa","#7b2cbf"];
+const clean = s => (s || "").replace(/[^a-z0-9]/gi, "").slice(0, 16);
+const ROOM = clean(location.hash) || Math.random().toString(36).slice(2, 7);
+if (!location.hash) history.replaceState(null, "", "#" + ROOM);
+const HOST_ID = "rolltogether-" + ROOM;
 
-  <hr>
+const nameEl = document.getElementById("name"), statusEl = document.getElementById("status");
+const me = {
+  id: null, x: 300 + Math.random() * (WORLD.w - 600), y: 200 + Math.random() * (WORLD.h - 400),
+  vx: 0, vy: 0, c: COLORS[Math.floor(Math.random() * COLORS.length)],
+  n: ""
+};
+try { nameEl.value = localStorage.getItem("rt-name") || ""; } catch (e) {}
+me.n = nameEl.value || "Ball " + Math.floor(Math.random() * 900 + 100);
+nameEl.placeholder = me.n;
+nameEl.addEventListener("input", () => {
+  me.n = nameEl.value.trim() || nameEl.placeholder;
+  try { localStorage.setItem("rt-name", nameEl.value); } catch (e) {}
+});
+document.getElementById("share").onclick = async e => {
+  try { await navigator.clipboard.writeText(location.href); e.target.textContent = "Copied!"; }
+  catch (err) { prompt("Copy this link:", location.href); }
+  setTimeout(() => e.target.textContent = "Copy invite link", 1500);
+};
 
-  <input id="code" placeholder="Enter stream code">
-  <button id="join">Join stream</button>
+/* ---------- Networking (peer-to-peer; whoever opens the room first hosts it) ---------- */
+let peer = null, isHost = false, hostConn = null;
+const clients = new Map();   // host only: peerId -> {conn, x, y, c, n}
+const others = {};           // id -> {x, y, tx, ty, c, n}
 
-  <p id="status">Not connected.</p>
+function setStatus() {
+  const count = Object.keys(others).length + 1;
+  statusEl.textContent = peer && me.id ? count + (count === 1 ? " player" : " players") + (isHost ? " (hosting)" : "") : "Connecting…";
+}
 
-  <h2>Stream</h2>
-  <video id="screen" autoplay playsinline controls
-         style="max-width:100%"></video>
+function applyList(list) {
+  const seen = new Set();
+  for (const [id, x, y, c, n] of list) {
+    if (id === me.id) continue;
+    seen.add(id);
+    const o = others[id];
+    if (o) { o.tx = x; o.ty = y; o.c = c; o.n = n; }
+    else others[id] = { x, y, tx: x, ty: y, c, n };
+  }
+  for (const id of Object.keys(others)) if (!seen.has(id)) delete others[id];
+  setStatus();
+}
 
-  <p><button id="stop">Stop sharing</button></p>
+function reset(delay) {
+  try { peer && peer.destroy(); } catch (e) {}
+  peer = null; me.id = null; isHost = false; hostConn = null; clients.clear();
+  for (const k of Object.keys(others)) delete others[k];
+  setStatus();
+  setTimeout(start, delay || 800 + Math.random() * 1200);
+}
 
-  <h2>Chat</h2>
-  <div id="messages"></div>
-  <input id="message" placeholder="Message">
-  <button id="send">Send</button>
+function start() {
+  const p = new Peer(HOST_ID);
+  peer = p;
+  p.on("open", id => {               // room was free: we are the host
+    isHost = true; me.id = id; setStatus();
+    p.on("connection", conn => {
+      conn.on("data", d => {
+        if (d && d.t === "s") clients.set(conn.peer, { conn, x: d.x, y: d.y, c: d.c, n: String(d.n).slice(0, 12) });
+      });
+      const drop = () => { clients.delete(conn.peer); };
+      conn.on("close", drop); conn.on("error", drop);
+    });
+    setInterval(() => {
+      if (peer !== p) return;
+      const list = [[me.id, me.x, me.y, me.c, me.n]];
+      for (const [id, c] of clients) list.push([id, c.x, c.y, c.c, c.n]);
+      for (const [, c] of clients) if (c.conn.open) c.conn.send({ t: "w", l: list });
+      applyList(list);
+    }, TICK);
+  });
+  p.on("error", err => {
+    if (err.type === "unavailable-id") joinAsClient();   // someone already hosts this room
+    else if (err.type === "peer-unavailable") reset();   // host vanished
+    else if (!isHost && !me.id) reset(2000);
+  });
+  p.on("disconnected", () => { if (isHost) try { p.reconnect(); } catch (e) {} });
+}
 
-  <script src="https://unpkg.com/peerjs@1.5.5/dist/peerjs.min.js"></script>
-  <script>
-    const $ = id => document.getElementById(id);
-    let peer, connection, stream;
+function joinAsClient() {
+  try { peer.destroy(); } catch (e) {}
+  const p = new Peer();
+  peer = p;
+  p.on("open", id => {
+    me.id = id;
+    const conn = p.peer ? null : null; // (placeholder to keep scope clear)
+    hostConn = p.connect(HOST_ID, { reliable: false });
+    hostConn.on("open", () => {
+      setStatus();
+      const t = setInterval(() => {
+        if (peer !== p || !hostConn.open) return clearInterval(t);
+        hostConn.send({ t: "s", x: me.x, y: me.y, c: me.c, n: me.n });
+      }, TICK);
+    });
+    hostConn.on("data", d => { if (d && d.t === "w") applyList(d.l); });
+    hostConn.on("close", () => reset());
+    hostConn.on("error", () => reset());
+  });
+  p.on("error", err => { if (err.type === "peer-unavailable" || err.type === "network" || err.type === "server-error") reset(2000); });
+}
+start();
 
-    function status(text) {
-      $("status").textContent = text;
+/* ---------- Input ---------- */
+const keys = {};
+addEventListener("keydown", e => { if (document.activeElement === nameEl) return; keys[e.key.toLowerCase()] = true; });
+addEventListener("keyup", e => { keys[e.key.toLowerCase()] = false; });
+let pointer = null;
+const cv = document.getElementById("c"), ctx = cv.getContext("2d");
+cv.addEventListener("pointerdown", e => { pointer = { x: e.clientX, y: e.clientY }; nameEl.blur(); });
+cv.addEventListener("pointermove", e => { if (pointer) pointer = { x: e.clientX, y: e.clientY }; });
+addEventListener("pointerup", () => pointer = null);
+addEventListener("pointercancel", () => pointer = null);
+
+let W = 0, H = 0, dpr = 1;
+function resize() {
+  dpr = window.devicePixelRatio || 1; W = innerWidth; H = innerHeight;
+  cv.width = W * dpr; cv.height = H * dpr; ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+addEventListener("resize", resize); resize();
+
+/* ---------- Game loop ---------- */
+let last = performance.now(), camX = me.x, camY = me.y;
+
+function step(dt) {
+  let ax = 0, ay = 0;
+  if (keys["a"] || keys["arrowleft"]) ax -= 1;
+  if (keys["d"] || keys["arrowright"]) ax += 1;
+  if (keys["w"] || keys["arrowup"]) ay -= 1;
+  if (keys["s"] || keys["arrowdown"]) ay += 1;
+  if (pointer) {
+    const dx = pointer.x - (W / 2 + (me.x - camX)), dy = pointer.y - (H / 2 + (me.y - camY));
+    const len = Math.hypot(dx, dy);
+    if (len > 8) { const m = Math.min(len / 90, 1); ax = dx / len * m; ay = dy / len * m; }
+  }
+  const al = Math.hypot(ax, ay); if (al > 1) { ax /= al; ay /= al; }
+  me.vx += ax * 1500 * dt; me.vy += ay * 1500 * dt;
+  const f = Math.pow(0.002, dt);       // rolling friction
+  me.vx *= f; me.vy *= f;
+  const sp = Math.hypot(me.vx, me.vy), max = 420;
+  if (sp > max) { me.vx *= max / sp; me.vy *= max / sp; }
+  me.x += me.vx * dt; me.y += me.vy * dt;
+
+  for (const o of Object.values(others)) {   // bump into other balls
+    const dx = me.x - o.x, dy = me.y - o.y, d = Math.hypot(dx, dy);
+    if (d > 0 && d < R * 2) {
+      const nx = dx / d, ny = dy / d, push = R * 2 - d;
+      me.x += nx * push; me.y += ny * push;
+      me.vx += nx * 120; me.vy += ny * 120;
     }
+  }
+  if (me.x < R) { me.x = R; me.vx = Math.abs(me.vx) * .6; }
+  if (me.x > WORLD.w - R) { me.x = WORLD.w - R; me.vx = -Math.abs(me.vx) * .6; }
+  if (me.y < R) { me.y = R; me.vy = Math.abs(me.vy) * .6; }
+  if (me.y > WORLD.h - R) { me.y = WORLD.h - R; me.vy = -Math.abs(me.vy) * .6; }
 
-    function showMessage(who, text) {
-      const p = document.createElement("p");
-      p.textContent = who + ": " + text;
-      $("messages").appendChild(p);
-    }
+  const k = 1 - Math.pow(0.0001, dt);        // smooth other players
+  for (const o of Object.values(others)) { o.x += (o.tx - o.x) * k; o.y += (o.ty - o.y) * k; }
+  camX += (me.x - camX) * (1 - Math.pow(0.001, dt));
+  camY += (me.y - camY) * (1 - Math.pow(0.001, dt));
+}
 
-    function setupConnection(conn) {
-      if (connection) {
-        conn.close();
-        return;
-      }
+function ball(x, y, color, name, isMe) {
+  ctx.fillStyle = "rgba(0,0,0,.28)";
+  ctx.beginPath(); ctx.ellipse(x + 5, y + 8, R, R * .8, 0, 0, 7); ctx.fill();
+  const g = ctx.createRadialGradient(x - R * .4, y - R * .45, R * .1, x, y, R);
+  g.addColorStop(0, "#fff"); g.addColorStop(.25, color); g.addColorStop(1, "rgba(0,0,0,.55)");
+  ctx.fillStyle = color; ctx.beginPath(); ctx.arc(x, y, R, 0, 7); ctx.fill();
+  ctx.fillStyle = g; ctx.beginPath(); ctx.arc(x, y, R, 0, 7); ctx.fill();
+  if (isMe) { ctx.strokeStyle = "#ffd166"; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(x, y, R + 4, 0, 7); ctx.stroke(); }
+  ctx.font = "600 13px 'Trebuchet MS', sans-serif"; ctx.textAlign = "center";
+  const w = ctx.measureText(name).width + 12;
+  ctx.fillStyle = "rgba(20,16,12,.7)"; ctx.beginPath(); ctx.roundRect(x - w / 2, y - R - 26, w, 20, 10); ctx.fill();
+  ctx.fillStyle = "#f4efe3"; ctx.fillText(name, x, y - R - 12);
+}
 
-      connection = conn;
+function draw() {
+  ctx.fillStyle = "#4a2e1b"; ctx.fillRect(0, 0, W, H);
+  ctx.save();
+  ctx.translate(Math.round(W / 2 - camX), Math.round(H / 2 - camY));
+  ctx.fillStyle = "#1f5a45"; ctx.fillRect(0, 0, WORLD.w, WORLD.h);
+  ctx.strokeStyle = "rgba(244,239,227,.18)"; ctx.lineWidth = 3;          // table markings
+  ctx.beginPath(); ctx.moveTo(WORLD.w / 2, 0); ctx.lineTo(WORLD.w / 2, WORLD.h); ctx.stroke();
+  ctx.beginPath(); ctx.arc(WORLD.w / 2, WORLD.h / 2, 160, 0, 7); ctx.stroke();
+  ctx.beginPath(); ctx.arc(WORLD.w / 2, WORLD.h / 2, 8, 0, 7); ctx.fillStyle = "rgba(244,239,227,.18)"; ctx.fill();
+  ctx.strokeStyle = "#2e1a0d"; ctx.lineWidth = 16; ctx.strokeRect(-8, -8, WORLD.w + 16, WORLD.h + 16);
 
-      conn.on("open", () => {
-        status("Connected.");
-        showMessage("System", "Connected to the other person.");
-      });
+  const all = Object.values(others).map(o => [o.y, o.x, o.c, o.n, false]);
+  all.push([me.y, me.x, me.c, me.n, true]);
+  all.sort((a, b) => a[0] - b[0]);
+  for (const [y, x, c, n, m] of all) ball(x, y, c, n, m);
+  ctx.restore();
+}
 
-      conn.on("data", data => {
-        if (data.type === "chat") {
-          showMessage("Other person", data.text);
-        }
-
-        if (data.type === "offer") {
-          answerCall(data.offer);
-        }
-      });
-
-      conn.on("close", () => {
-        connection = null;
-        status("Connection closed.");
-      });
-    }
-
-    function answerCall(offer) {
-      const call = peer.call(offer.peerId, stream || undefined);
-      call.on("stream", remote => {
-        $("screen").srcObject = remote;
-      });
-    }
-
-    $("create").onclick = async () => {
-      peer = new Peer();
-
-      peer.on("open", id => {
-        $("mycode").textContent = "Your stream code: " + id;
-        $("code").value = id;
-        status("Waiting for the other person...");
-      });
-
-      peer.on("connection", setupConnection);
-
-      try {
-        stream = await navigator.mediaDevices.getDisplayMedia({
-          video: true,
-          audio: true
-        });
-        $("screen").srcObject = stream;
-      } catch (e) {
-        status("Screen sharing cancelled or unavailable.");
-      }
-    };
-
-    $("join").onclick = () => {
-      const id = $("code").value.trim();
-      if (!id) return;
-
-      peer = new Peer();
-
-      peer.on("open", () => {
-        const conn = peer.connect(id);
-        setupConnection(conn);
-      });
-
-      peer.on("error", e => status("Connection error: " + e.type));
-    };
-
-    $("send").onclick = () => {
-      const text = $("message").value.trim();
-      if (!text || !connection || !connection.open) return;
-
-      connection.send({ type: "chat", text });
-      showMessage("Me", text);
-      $("message").value = "";
-    };
-
-    $("message").onkeydown = e => {
-      if (e.key === "Enter") $("send").click();
-    };
-
-    $("stop").onclick = () => {
-      if (stream) stream.getTracks().forEach(track => track.stop());
-      stream = null;
-      $("screen").srcObject = null;
-    };
-  </script>
+function frame(now) {
+  const dt = Math.min((now - last) / 1000, 0.05); last = now;
+  step(dt); draw();
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
 </body>
 </html>
